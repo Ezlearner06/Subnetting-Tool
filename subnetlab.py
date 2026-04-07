@@ -222,6 +222,7 @@ class SubnetLab(tk.Tk):
 
         # Track current results
         self.result = None
+        self.subnets = []  # accumulated subnets for routing tab
 
         self._configure_styles()
         self._build_header()
@@ -304,6 +305,13 @@ class SubnetLab(tk.Tk):
                                relief="flat", command=self._on_clear)
         btn_clear.pack(side="left")
 
+        btn_add = tk.Button(inp_frame, text="+ TABLE", bg=GREEN, fg=BG_DARK,
+                             font=("Arial", 10, "bold"), padx=12, pady=6,
+                             relief="flat", cursor="hand2",
+                             activebackground="#2ecc71",
+                             command=self._add_to_routing)
+        btn_add.pack(side="left", padx=(8, 0))
+
     def _set_placeholder(self):
         self.entry.delete(0, "end")
         self.entry.insert(0, "e.g. 192.168.1.1/24")
@@ -345,17 +353,20 @@ class SubnetLab(tk.Tk):
         self.tab_binary = tk.Frame(self.notebook, bg=BG_DARK)
         self.tab_nh     = tk.Frame(self.notebook, bg=BG_DARK)
         self.tab_table  = tk.Frame(self.notebook, bg=BG_DARK)
+        self.tab_routing = tk.Frame(self.notebook, bg=BG_DARK)
 
         self.notebook.add(self.tab_dash,   text="  ⌂ DASHBOARD  ")
         self.notebook.add(self.tab_binary, text="  ⊕ BINARY ANALYSIS  ")
         self.notebook.add(self.tab_nh,     text="  ≡ NH PATTERN  ")
         self.notebook.add(self.tab_table,  text="  ▦ SUBNET TABLE  ")
+        self.notebook.add(self.tab_routing, text="  ⊞ ROUTING TABLE  ")
 
         # Pre-build empty canvases / scrollable frames
         self._init_dashboard()
         self._init_binary()
         self._init_nh()
         self._init_table()
+        self._init_routing()
 
     # ───────── status bar ─────────
     def _build_status_bar(self):
@@ -1001,6 +1012,318 @@ class SubnetLab(tk.Tk):
         except Exception as e:
             self._set_status(f"✗ Export failed: {e}", RED)
 
+    # ═══════════════════════════════════════
+    # TAB 5 — ROUTING TABLE & SUBNET TREE
+    # ═══════════════════════════════════════
+
+    def _init_routing(self):
+        # ── Top controls ──
+        ctrl = tk.Frame(self.tab_routing, bg=PANEL_BG, padx=15, pady=10)
+        ctrl.pack(fill="x", padx=10, pady=(10, 5))
+
+        tk.Label(ctrl, text="QUICK ADD:", fg=CYAN, bg=PANEL_BG,
+                 font=("Arial", 10, "bold")).pack(side="left")
+
+        self.routing_entry = tk.Entry(ctrl, width=22, bg=BG_DARK, fg=TEXT_DIM,
+                                       insertbackground=CYAN, font=("Courier New", 12),
+                                       relief="flat", highlightthickness=1,
+                                       highlightcolor=CYAN, highlightbackground=BORDER)
+        self.routing_entry.pack(side="left", padx=(8, 0))
+        self.routing_entry.insert(0, "e.g. 10.0.0.0/8")
+        self._routing_ph = True
+        self.routing_entry.bind("<FocusIn>", self._rt_clear_ph)
+        self.routing_entry.bind("<FocusOut>", self._rt_restore_ph)
+        self.routing_entry.bind("<Return>", lambda e: self._quick_add_subnet())
+
+        tk.Button(ctrl, text="+ ADD", bg=GREEN, fg=BG_DARK,
+                  font=("Arial", 10, "bold"), padx=12, pady=4, relief="flat",
+                  cursor="hand2", command=self._quick_add_subnet).pack(side="left", padx=(6, 0))
+
+        self.rt_count = tk.Label(ctrl, text="0 subnets", fg=TEXT_DIM,
+                                  bg=PANEL_BG, font=("Courier New", 10))
+        self.rt_count.pack(side="right", padx=(0, 8))
+
+        tk.Button(ctrl, text="CLEAR ALL", bg=RED, fg="#ffffff",
+                  font=("Arial", 10, "bold"), padx=12, pady=4, relief="flat",
+                  cursor="hand2", command=self._rt_clear_all).pack(side="right", padx=(0, 8))
+
+        # ── Paned: tree on top, table on bottom ──
+        pane = tk.PanedWindow(self.tab_routing, orient="vertical", bg=BG_DARK,
+                               sashwidth=6, sashrelief="flat")
+        pane.pack(fill="both", expand=True, padx=10, pady=5)
+
+        # --- Tree canvas section ---
+        tree_sec = tk.Frame(pane, bg=PANEL_BG)
+        pane.add(tree_sec, minsize=180)
+
+        hdr = tk.Frame(tree_sec, bg=PANEL_BG)
+        hdr.pack(fill="x", padx=12, pady=(8, 4))
+        tk.Label(hdr, text="SUBNET HIERARCHY TREE", fg=CYAN, bg=PANEL_BG,
+                 font=("Arial", 10, "bold")).pack(side="left")
+        self.rt_overlap = tk.Label(hdr, text="", fg=RED, bg=PANEL_BG,
+                                    font=("Arial", 9, "bold"))
+        self.rt_overlap.pack(side="right")
+
+        cvs_f = tk.Frame(tree_sec, bg=BG_DARK)
+        cvs_f.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.tree_cvs = tk.Canvas(cvs_f, bg=BG_DARK, highlightthickness=0)
+        xsb = tk.Scrollbar(cvs_f, orient="horizontal", command=self.tree_cvs.xview)
+        self.tree_cvs.configure(xscrollcommand=xsb.set)
+        self.tree_cvs.pack(side="top", fill="both", expand=True)
+        xsb.pack(side="bottom", fill="x")
+        self.tree_cvs.bind("<Configure>", lambda e: self._rt_redraw_tree())
+
+        # --- Routing table section ---
+        tbl_sec = tk.Frame(pane, bg=PANEL_BG)
+        pane.add(tbl_sec, minsize=140)
+
+        tk.Label(tbl_sec, text="ROUTING TABLE", fg=CYAN, bg=PANEL_BG,
+                 font=("Arial", 10, "bold")).pack(anchor="w", padx=12, pady=(8, 4))
+
+        tf = tk.Frame(tbl_sec, bg=BG_DARK)
+        tf.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+        cols = ("net", "cidr", "mask", "bcast", "range", "hosts", "rm")
+        self.rt_tv = ttk.Treeview(tf, columns=cols, show="headings",
+                                    style="Subnet.Treeview", height=6)
+        for cid, hd, w, st in [
+            ("net", "Network", 130, False), ("cidr", "CIDR", 48, False),
+            ("mask", "Subnet Mask", 130, False), ("bcast", "Broadcast", 130, False),
+            ("range", "Usable Range", 250, True), ("hosts", "Usable", 70, False),
+            ("rm", "✕", 28, False),
+        ]:
+            self.rt_tv.heading(cid, text=hd)
+            self.rt_tv.column(cid, width=w, stretch=st)
+
+        sb = tk.Scrollbar(tf, orient="vertical", command=self.rt_tv.yview)
+        self.rt_tv.configure(yscrollcommand=sb.set)
+        self.rt_tv.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        self.rt_tv.bind("<ButtonRelease-1>", self._rt_on_click)
+
+        self._rt_draw_empty()
+
+    # ── placeholder helpers ──
+    def _rt_clear_ph(self, _=None):
+        if self._routing_ph:
+            self.routing_entry.delete(0, "end")
+            self.routing_entry.config(fg=CYAN)
+            self._routing_ph = False
+
+    def _rt_restore_ph(self, _=None):
+        if not self.routing_entry.get().strip():
+            self.routing_entry.delete(0, "end")
+            self.routing_entry.insert(0, "e.g. 10.0.0.0/8")
+            self.routing_entry.config(fg=TEXT_DIM)
+            self._routing_ph = True
+
+    # ── add / remove ──
+    def _add_to_routing(self):
+        if not self.result:
+            self._set_status("⚠ Analyse a subnet first, then click + TABLE", ORANGE)
+            return
+        self._rt_insert(self.result["network"], self.result["prefix"])
+
+    def _quick_add_subnet(self):
+        raw = self.routing_entry.get().strip()
+        if self._routing_ph or not raw:
+            self._set_status("⚠ Enter a subnet (e.g. 10.0.0.0/8)", ORANGE)
+            return
+        try:
+            ip, prefix = parse_input(raw)
+        except ValueError as e:
+            self._set_status(f"✗ {e}", RED)
+            return
+        net = calculate_network_id(ip, prefix)
+        self._rt_insert(net, prefix)
+        self.routing_entry.delete(0, "end")
+        self._rt_restore_ph()
+
+    def _rt_insert(self, network, prefix):
+        net_int = ip_to_int(network)
+        for s in self.subnets:
+            if s["ni"] == net_int and s["p"] == prefix:
+                self._set_status(f"⚠ {network}/{prefix} already exists", ORANGE)
+                return
+        mask = cidr_to_mask(prefix)
+        bcast = calculate_broadcast(network, prefix)
+        bi = ip_to_int(bcast)
+        hb = 32 - prefix
+        total = 2 ** hb
+        if prefix == 32:
+            usable, first, last = 1, network, network
+        elif prefix == 31:
+            usable, first, last = 2, network, bcast
+        else:
+            usable = total - 2
+            first = int_to_ip(net_int + 1)
+            last = int_to_ip(bi - 1)
+        self.subnets.append({
+            "net": network, "p": prefix, "mask": mask, "bcast": bcast,
+            "ni": net_int, "bi": bi, "first": first, "last": last,
+            "total": total, "usable": usable, "hb": hb,
+            "cls": classify_ip(network),
+        })
+        self._rt_refresh()
+        self._set_status(f"✓ Added {network}/{prefix}  ({len(self.subnets)} subnets)", GREEN)
+
+    def _rt_remove(self, idx):
+        if 0 <= idx < len(self.subnets):
+            s = self.subnets.pop(idx)
+            self._rt_refresh()
+            self._set_status(f"Removed {s['net']}/{s['p']}", ORANGE)
+
+    def _rt_clear_all(self):
+        self.subnets.clear()
+        self._rt_refresh()
+        self._set_status("Routing table cleared", TEXT_DIM)
+
+    def _rt_on_click(self, event):
+        col = self.rt_tv.identify_column(event.x)
+        item = self.rt_tv.identify_row(event.y)
+        if col == "#7" and item:
+            kids = list(self.rt_tv.get_children())
+            if item in kids:
+                self._rt_remove(kids.index(item))
+
+    # ── refresh ──
+    def _rt_refresh(self):
+        n = len(self.subnets)
+        self.rt_count.config(text=f"{n} subnet{'s' if n != 1 else ''}")
+        ss = sorted(self.subnets, key=lambda s: (s["ni"], s["p"]))
+
+        # detect partial overlaps
+        ov_ids = set()
+        for i in range(len(ss)):
+            for j in range(i + 1, len(ss)):
+                a, b = ss[i], ss[j]
+                if a["ni"] <= b["bi"] and b["ni"] <= a["bi"]:
+                    a_in_b = a["ni"] >= b["ni"] and a["bi"] <= b["bi"]
+                    b_in_a = b["ni"] >= a["ni"] and b["bi"] <= a["bi"]
+                    if not a_in_b and not b_in_a:
+                        ov_ids.add(id(a)); ov_ids.add(id(b))
+
+        self.rt_overlap.config(
+            text=f"⚠ {len(ov_ids)} overlapping" if ov_ids else (
+                "✓ No overlaps" if n else ""))
+
+        # rebuild treeview
+        for item in self.rt_tv.get_children():
+            self.rt_tv.delete(item)
+        self.rt_tv.tag_configure("ro", background=PANEL_BG)
+        self.rt_tv.tag_configure("re", background="#0d1a2a")
+        self.rt_tv.tag_configure("rov", background="#2a0a0f")
+        for i, s in enumerate(ss):
+            tag = "rov" if id(s) in ov_ids else ("ro" if i % 2 == 0 else "re")
+            self.rt_tv.insert("", "end", values=(
+                s["net"], f"/{s['p']}", s["mask"], s["bcast"],
+                f"{s['first']} – {s['last']}", f"{s['usable']:,}", "✕"
+            ), tags=(tag,))
+
+        # tree vis
+        if self.subnets:
+            self._rt_draw_tree(ss)
+        else:
+            self._rt_draw_empty()
+
+    # ── tree hierarchy ──
+    def _rt_build_hier(self, ss):
+        nodes = [{"d": s, "ch": [], "x": 0, "y": 0} for s in ss]
+        roots = []
+        for nd in nodes:
+            placed = False
+            for r in roots:
+                if self._rt_place(r, nd):
+                    placed = True; break
+            if not placed:
+                roots.append(nd)
+        return roots
+
+    def _rt_place(self, parent, child):
+        pd, cd = parent["d"], child["d"]
+        if pd["ni"] <= cd["ni"] and pd["bi"] >= cd["bi"] and pd["p"] < cd["p"]:
+            for ch in parent["ch"]:
+                if self._rt_place(ch, child):
+                    return True
+            parent["ch"].append(child)
+            return True
+        return False
+
+    # ── canvas drawing ──
+    def _rt_draw_empty(self):
+        c = self.tree_cvs; c.delete("all")
+        c.update_idletasks()
+        w = max(c.winfo_width(), 400)
+        h = max(c.winfo_height(), 160)
+        c.configure(scrollregion=(0, 0, w, h))
+        c.create_text(w // 2, h // 2,
+            text="Add subnets to visualise the hierarchy tree\n\n"
+                 "Use 'Quick Add' above or analyse an IP then click '+ TABLE'",
+            fill=TEXT_DIM, font=("Arial", 11), justify="center")
+
+    def _rt_redraw_tree(self):
+        if self.subnets:
+            ss = sorted(self.subnets, key=lambda s: (s["ni"], s["p"]))
+            self._rt_draw_tree(ss)
+        else:
+            self._rt_draw_empty()
+
+    def _rt_draw_tree(self, ss):
+        c = self.tree_cvs; c.delete("all")
+        c.update_idletasks()
+        NW, NH, HG, VG = 168, 52, 28, 55
+        hier = self._rt_build_hier(ss)
+
+        def leaves(nd):
+            if not nd["ch"]: return 1
+            return sum(leaves(ch) for ch in nd["ch"])
+
+        tl = sum(leaves(r) for r in hier) or 1
+        cw = max(tl * (NW + HG), c.winfo_width() or 600)
+        slot = cw / tl
+        li = [0]
+
+        def layout(nd, dep):
+            nd["y"] = 25 + dep * (NH + VG)
+            if not nd["ch"]:
+                nd["x"] = li[0] * slot + slot / 2
+                li[0] += 1
+            else:
+                for ch in nd["ch"]:
+                    layout(ch, dep + 1)
+                xs = [ch["x"] for ch in nd["ch"]]
+                nd["x"] = (min(xs) + max(xs)) / 2
+
+        for r in hier:
+            layout(r, 0)
+
+        def mdep(nd):
+            if not nd["ch"]: return 0
+            return 1 + max(mdep(ch) for ch in nd["ch"])
+
+        deepest = max(mdep(r) for r in hier) if hier else 0
+        ch_ = max(25 + (deepest + 1) * (NH + VG) + 30, c.winfo_height() or 200)
+        c.configure(scrollregion=(0, 0, cw, ch_))
+
+        def draw(nd):
+            x, y, s = nd["x"], nd["y"], nd["d"]
+            cc = CLASS_COLORS.get(s["cls"]["class"], CYAN)
+            for ch in nd["ch"]:
+                c.create_line(x, y + NH, ch["x"], ch["y"],
+                              fill=BORDER, width=2, dash=(4, 3))
+            x1, y1, x2, y2 = x - NW // 2, y, x + NW // 2, y + NH
+            c.create_rectangle(x1, y1, x2, y2, fill=PANEL_BG, outline=cc, width=2)
+            c.create_rectangle(x1, y1, x2, y1 + 3, fill=cc, outline=cc)
+            c.create_text(x, y + 17, text=f"{s['net']}/{s['p']}",
+                          fill=cc, font=("Courier New", 10, "bold"))
+            c.create_text(x, y + 35, text=f"{s['usable']:,} hosts",
+                          fill=TEXT_DIM, font=("Courier New", 8))
+            for ch in nd["ch"]:
+                draw(ch)
+
+        for r in hier:
+            draw(r)
+
 
 # ═══════════════════════════════════════════
 # ENTRY POINT
@@ -1009,3 +1332,4 @@ class SubnetLab(tk.Tk):
 if __name__ == "__main__":
     app = SubnetLab()
     app.mainloop()
+
