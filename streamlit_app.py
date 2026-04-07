@@ -201,16 +201,16 @@ div[data-testid="stDataFrame"] > div {{ margin-bottom: 0 !important; }}
 
 h1, h2 = st.columns([6, 1])
 with h1:
-    st.markdown(f"""<div style="display:flex;align-items:baseline;gap:12px;padding:4px 0;">
-        <span style="font-family:Inter;font-size:1.6rem;font-weight:900;background:linear-gradient(90deg,{CYAN},{GREEN});-webkit-background-clip:text;-webkit-text-fill-color:transparent;">🌐 SubnetLab</span>
-        <span style="color:{DIM};font-size:0.75rem;">IP Subnet Calculator & Network Analyzer</span>
+    st.markdown(f"""<div style="display:flex;align-items:baseline;gap:12px;padding-top:12px;">
+        <span class="topbar-title">🌐 SubnetLab</span>
+        <span class="topbar-sub">IP Subnet Calculator & Network Analyzer</span>
     </div>""", unsafe_allow_html=True)
 with h2:
+    st.markdown("<div style='padding-top:10px;'></div>", unsafe_allow_html=True)
     icon = "☀️ Light" if dark else "🌙 Dark"
     if st.button(icon, key="theme_toggle", use_container_width=True):
         st.session_state.dark_mode = not st.session_state.dark_mode
         st.rerun()
-
 
 # ═══════════════════════════════════════════
 # INPUT BAR
